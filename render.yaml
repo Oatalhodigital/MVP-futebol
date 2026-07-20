@@ -3,7 +3,7 @@ services:
     name: football-analysis-api
     runtime: docker
     dockerfilePath: ./Dockerfile
-    rootDir: ./backend
+    rootDir: .
     envVars:
       - key: FRONTEND_URL
         value: https://YOUR-FRONTEND-URL.vercel.app
