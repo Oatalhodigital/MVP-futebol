@@ -15,7 +15,6 @@ Vá até o serviço `football-analysis-api` (ou equivalente) em https://dashboar
 | `FRONTEND_URL` | `https://mvp-futebol.vercel.app` (sem barra no final) | **Sim** |
 | `GOOGLE_API_KEY` | sua chave real | Não |
 | `GOOGLE_CX` | seu CX real | Não (se usar Google) |
-| `BING_API_KEY` | sua chave real | Não |
 | `COMPLETENESS_THRESHOLD` | `0.3` | Não |
 | `CACHE_TTL_SECONDS` | `60` | Não |
 | `PLAYWRIGHT_HEADLESS` | `true` | Não |

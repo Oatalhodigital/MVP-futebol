@@ -9,7 +9,6 @@ class Settings(BaseSettings):
 
     google_api_key: str | None = None
     google_cx: str | None = None
-    bing_api_key: str | None = None
     cache_ttl_seconds: int = 60
     completeness_threshold: float = 0.3
     playwright_headless: bool = True

@@ -45,8 +45,6 @@ FRONTEND_URL=https://meu-painel.vercel.app
 # Opcional, mas recomendado para melhorar a qualidade dos dados
 GOOGLE_API_KEY=...
 GOOGLE_CX=...
-# ou
-BING_API_KEY=...
 
 COMPLETENESS_THRESHOLD=0.3
 CACHE_TTL_SECONDS=60
@@ -92,7 +90,7 @@ O frontend roda em `http://localhost:5173` e proxya chamadas `/api` para `VITE_A
 2. Use `Docker` como runtime com `backend/Dockerfile`.
 3. Defina as variáveis de ambiente:
    - `FRONTEND_URL` = URL do frontend na Vercel
-   - `GOOGLE_API_KEY` / `GOOGLE_CX` ou `BING_API_KEY`
+   - `GOOGLE_API_KEY` / `GOOGLE_CX`
 4. O arquivo `render.yaml` já prepara a configuração (substitua `YOUR-FRONTEND-URL`).
 
 ### Frontend (Vercel)

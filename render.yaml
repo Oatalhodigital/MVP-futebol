@@ -11,8 +11,6 @@ services:
         sync: false
       - key: GOOGLE_CX
         sync: false
-      - key: BING_API_KEY
-        sync: false
       - key: COMPLETENESS_THRESHOLD
         value: "0.3"
       - key: CACHE_TTL_SECONDS
