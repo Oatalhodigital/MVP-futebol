@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: football-analysis-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    rootDir: ./backend
+    envVars:
+      - key: FRONTEND_URL
+        value: https://YOUR-FRONTEND-URL.vercel.app
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: GOOGLE_CX
+        sync: false
+      - key: BING_API_KEY
+        sync: false
+      - key: COMPLETENESS_THRESHOLD
+        value: "0.3"
+      - key: CACHE_TTL_SECONDS
+        value: "60"
+      - key: PLAYWRIGHT_HEADLESS
+        value: "true"

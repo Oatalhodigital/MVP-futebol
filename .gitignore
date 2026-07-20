@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+backend/.venv/
+backend/venv/
+env/
+ENV/
+.env
+backend/.env
+frontend/.env
+
+# SQLite cache
+backend/cache/
+*.db
+
+# Node / Vite
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+*.log
+npm-debug.log*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local prompts / temporary files
+prompt-devin-*.md
+"prompt-devin-painel-analise-futebol*.md"
+httpswww.365scores.compt-br.txt
+pt-br.htm
+mvp-futebol/
+
+# OS
+.DS_Store
+Thumbs.db
