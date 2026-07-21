@@ -184,7 +184,12 @@ def extract_score_with_teams(
     score_regex = re.compile(r"(\d{1,2})\s*[-–:]\s*(\d{1,2})")
     candidates = []
     for m in score_regex.finditer(text):
-        score_text = m.group(0)
+        g_a = int(m.group(1))
+        g_b = int(m.group(2))
+        # Sanity filter: professional matches rarely exceed 15 goals total
+        if g_a > 15 or g_b > 15 or (g_a + g_b) > 20:
+            continue
+
         start = max(0, m.start() - 120)
         end = min(len(text), m.end() + 120)
         context = text[start:end].lower()
@@ -214,10 +219,12 @@ def extract_score_with_teams(
         best = candidates[0][1]
         return int(best.group(1)), int(best.group(2))
 
-    # Last resort: the first score-looking pair
-    m = score_regex.search(text)
-    if m:
-        return int(m.group(1)), int(m.group(2))
+    # Last resort: the first sane score-looking pair
+    for m in score_regex.finditer(text):
+        g_a = int(m.group(1))
+        g_b = int(m.group(2))
+        if g_a <= 15 and g_b <= 15 and (g_a + g_b) <= 20:
+            return g_a, g_b
     return None, None
 
 
