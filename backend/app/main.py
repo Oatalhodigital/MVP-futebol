@@ -21,16 +21,29 @@ def _normalize_origin(origin: str | None) -> str | None:
 
 
 def _build_cors_config() -> tuple[list[str], str]:
-    """Build allow_origins and allow_origin_regex from environment."""
-    frontend_url = _normalize_origin(os.getenv("FRONTEND_URL"))
-    local_regex = r"https?://(localhost|127\.0\.0\.1)(:\d+)?"
+    """Build allow_origins and allow_origin_regex from environment.
 
-    if frontend_url:
-        logger.info("CORS configured for frontend: %s", frontend_url)
-        return [frontend_url], local_regex
+    FRONTEND_URL can be a comma-separated list of origins.
+    Additionally, localhost/127.0.0.1 and Vercel preview/production
+    subdomains are allowed by regex.
+    """
+    raw_frontend = os.getenv("FRONTEND_URL") or ""
+    origins: list[str] = []
+    for origin in raw_frontend.split(","):
+        norm = _normalize_origin(origin)
+        if norm:
+            origins.append(norm)
 
-    logger.warning("FRONTEND_URL not set; CORS will only allow localhost/127.0.0.1")
-    return [], local_regex
+    # Allow localhost for local development and any Vercel subdomain
+    # for preview/production deployments under the same account.
+    local_regex = r"https?://((localhost|127\.0\.0\.1)(:\d+)?|.*\.vercel\.app)$"
+
+    if origins:
+        logger.info("CORS configured for frontends: %s", origins)
+    else:
+        logger.warning("FRONTEND_URL not set; CORS will only allow localhost/127.0.0.1 and *.vercel.app")
+
+    return origins, local_regex
 
 
 allow_origins, allow_origin_regex = _build_cors_config()
