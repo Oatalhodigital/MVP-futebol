@@ -1,8 +1,11 @@
 import asyncio
+import logging
 import re
 from datetime import datetime
 from typing import Any
 from urllib.parse import quote
+
+logger = logging.getLogger(__name__)
 
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
@@ -41,9 +44,11 @@ class BrowserNavigationProvider(DataProvider):
 
     async def get_match_stats(self, match_input: MatchInput) -> MatchData:
         try:
+            logger.info("BrowserNavigationProvider starting for %s vs %s", match_input.team_a, match_input.team_b)
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(None, self._scrape_with_fresh_loop, match_input)
         except Exception as exc:
+            logger.warning("BrowserNavigationProvider failed: %s", exc, exc_info=True)
             return MatchData(
                 team_a=match_input.team_a,
                 team_b=match_input.team_b,
@@ -61,11 +66,19 @@ class BrowserNavigationProvider(DataProvider):
         return asyncio.run(self._scrape_with_browser(match_input))
 
     async def _scrape_with_browser(self, match_input: MatchInput) -> MatchData:
+        logger.info("Launching Playwright browser (headless=%s)", self.settings.playwright_headless)
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=self.settings.playwright_headless,
-                args=["--disable-blink-features=AutomationControlled"],
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                ],
             )
+            logger.info("Browser launched successfully")
             context = await browser.new_context(
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -75,12 +88,15 @@ class BrowserNavigationProvider(DataProvider):
                 locale="pt-BR",
             )
             page = await context.new_page()
-            data = await self._scrape(page, match_input)
-            await browser.close()
+            try:
+                data = await self._scrape(page, match_input)
+            finally:
+                await browser.close()
             return data
 
     async def _scrape(self, page, match_input: MatchInput) -> MatchData:
         settings = self.settings
+        logger.info("Navigating to 365Scores home")
         await page.goto(
             self.urls["home"],
             wait_until="domcontentloaded",
@@ -91,6 +107,7 @@ class BrowserNavigationProvider(DataProvider):
 
         match_url = await self._find_match_url(page, match_input)
         if match_url:
+            logger.info("Found match URL: %s", match_url)
             await page.goto(
                 match_url,
                 wait_until="domcontentloaded",
@@ -100,6 +117,7 @@ class BrowserNavigationProvider(DataProvider):
         else:
             # Fallback direct search URL if available
             query = quote(f"{match_input.team_a} {match_input.team_b}")
+            logger.info("No direct match URL, using search fallback")
             await page.goto(
                 f"{self.urls['search']}?q={query}",
                 wait_until="domcontentloaded",
@@ -110,6 +128,7 @@ class BrowserNavigationProvider(DataProvider):
         body_text = (await page.locator("body").text_content() or "").lower()
         html = await page.content()
         soup = BeautifulSoup(html, "lxml")
+        logger.info("Page text sample: %s", body_text[:300].replace("\n", " "))
 
         status_str, period = status_from_text(body_text)
         try:

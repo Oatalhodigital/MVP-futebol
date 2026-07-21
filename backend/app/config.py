@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     cache_ttl_seconds: int = 60
     completeness_threshold: float = 0.3
     playwright_headless: bool = True
-    provider_timeout_seconds: float = 25.0
+    provider_timeout_seconds: float = 60.0
 
     class Config:
         env_file = ".env"

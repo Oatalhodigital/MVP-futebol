@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime
 
 from app.cache import MatchCache
@@ -8,6 +9,8 @@ from app.providers.browser_navigation_provider import BrowserNavigationProvider
 from app.providers.google_sync_provider import GoogleSyncProvider
 from app.providers.mock_provider import MockProvider
 from app.providers.web_search_provider import WebSearchProvider
+
+logger = logging.getLogger(__name__)
 
 
 class DataProviderOrchestrator:
@@ -39,6 +42,7 @@ class DataProviderOrchestrator:
         results: list[MatchData] = []
         for provider in self.providers:
             try:
+                logger.info("Trying provider %s", provider.name)
                 cached_provider = self.cache.get(match_input, provider.name)
                 if cached_provider:
                     data = cached_provider
@@ -47,12 +51,19 @@ class DataProviderOrchestrator:
                     if data:
                         self.cache.set(match_input, provider.name, data)
 
+                logger.info(
+                    "Provider %s returned source=%s completeness=%s",
+                    provider.name,
+                    data.source if data else None,
+                    data.completeness if data else None,
+                )
                 if data and data.completeness > 0:
                     results.append(data)
                     # If one provider alone is very complete, use it immediately
                     if data.completeness >= 0.85:
                         break
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Provider %s raised exception: %s", provider.name, exc, exc_info=True)
                 continue
 
         # Exclude mock/placeholder results from being treated as real data
