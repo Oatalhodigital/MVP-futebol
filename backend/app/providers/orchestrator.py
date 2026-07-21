@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import datetime
 
@@ -6,6 +7,7 @@ from app.config import get_settings
 from app.models import LiveState, MatchData, MatchInput, MatchStatus, TeamStats
 from app.providers.base import DataProvider
 from app.providers.browser_navigation_provider import BrowserNavigationProvider
+from app.providers.browser_search_provider import BrowserSearchProvider
 from app.providers.google_sync_provider import GoogleSyncProvider
 from app.providers.mock_provider import MockProvider
 from app.providers.thesportsdb_provider import TheSportsDbProvider
@@ -16,9 +18,16 @@ logger = logging.getLogger(__name__)
 
 class DataProviderOrchestrator:
     """Tries real providers in priority order, caches results, and merges the
-    best pieces from each source (live state from 365Scores, historical stats
-    from Google/Bing, fallback snippets from web search). Mock data is used
-    only as a structural placeholder when all real sources fail.
+    best pieces from each source.
+
+    Priority order (no paid API keys required by default):
+      1. BrowserNavigationProvider (365Scores direct navigation)
+      2. BrowserSearchProvider (DuckDuckGo / Google HTML, no API key)
+      3. TheSportsDbProvider (free public API)
+      4. GoogleSyncProvider (paid Google/Bing API, disabled when not configured)
+      5. WebSearchProvider (Yahoo HTML snippets, lightweight fallback)
+
+    Mock data is used only as a structural placeholder when all real sources fail.
     """
 
     def __init__(
@@ -26,14 +35,43 @@ class DataProviderOrchestrator:
         providers: list[DataProvider] | None = None,
         cache: MatchCache | None = None,
     ):
-        self.providers = providers or [
-            TheSportsDbProvider(),
-            BrowserNavigationProvider(),
-            GoogleSyncProvider(),
-            WebSearchProvider(),
-        ]
+        self.providers = providers or self._default_providers()
         self.cache = cache or MatchCache()
         self.settings = get_settings()
+
+    def _default_providers(self) -> list[DataProvider]:
+        providers: list[DataProvider] = [
+            BrowserNavigationProvider(),
+            BrowserSearchProvider(),
+            TheSportsDbProvider(),
+        ]
+        google = GoogleSyncProvider()
+        if google.is_configured():
+            providers.append(google)
+        providers.append(WebSearchProvider())
+        return providers
+
+    def _provider_timeout(self, match_input: MatchInput) -> float:
+        """Shorter timeout for live/upcoming matches; longer for historical lookups."""
+        if match_input.match_datetime:
+            delta = datetime.utcnow() - match_input.match_datetime
+            if abs(delta.total_seconds()) < 7200:  # within 2 hours of kickoff
+                return 15.0
+        return 25.0
+
+    def _cache_ttl(self, match_input: MatchInput) -> int:
+        """Aggressive caching for future matches and completed games to reduce navigation."""
+        if match_input.match_datetime:
+            delta = datetime.utcnow() - match_input.match_datetime
+            seconds = delta.total_seconds()
+            if seconds < 0:
+                # Future match: cache for 1 hour
+                return 3600
+            if seconds > 7200:
+                # Finished match: cache for 6 hours
+                return 21600
+        # Live or unknown: cache for 2 minutes
+        return 120
 
     async def get_match_stats(self, match_input: MatchInput) -> MatchData:
         # Try cache first for short-circuiting simultaneous users
@@ -43,6 +81,7 @@ class DataProviderOrchestrator:
 
         results: list[MatchData] = []
         provider_debug: list[dict[str, Any]] = []
+        timeout = self._provider_timeout(match_input)
         for provider in self.providers:
             try:
                 logger.info("Trying provider %s", provider.name)
@@ -50,9 +89,14 @@ class DataProviderOrchestrator:
                 if cached_provider and cached_provider.completeness > 0:
                     data = cached_provider
                 else:
-                    data = await provider.get_match_stats(match_input)
+                    data = await asyncio.wait_for(
+                        provider.get_match_stats(match_input), timeout=timeout
+                    )
                     if data and data.completeness > 0:
-                        self.cache.set(match_input, provider.name, data)
+                        self.cache.set(
+                            match_input, provider.name, data,
+                            ttl_seconds=self._cache_ttl(match_input)
+                        )
 
                 logger.info(
                     "Provider %s returned source=%s completeness=%s",
@@ -66,6 +110,8 @@ class DataProviderOrchestrator:
                         "source": data.source if data else None,
                         "completeness": data.completeness if data else None,
                         "error": (data.raw_metadata or {}).get("error") if data else None,
+                        "team_a_found": (data.raw_metadata or {}).get("team_a_found") if data else None,
+                        "team_b_found": (data.raw_metadata or {}).get("team_b_found") if data else None,
                     }
                 )
                 if data and data.completeness > 0:

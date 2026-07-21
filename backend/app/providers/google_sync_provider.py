@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 from app.config import get_settings
 from app.models import LastMatch, LiveState, MatchData, MatchInput, MatchStatus, TeamStats
 from app.providers.base import DataProvider
+from app.providers.team_names import resolve_team_names
 from app.providers.utils import (
     contains_team,
     extract_minute,
@@ -31,6 +32,13 @@ class GoogleSyncProvider(DataProvider):
     def __init__(self):
         self.settings = get_settings()
 
+    def is_configured(self) -> bool:
+        """Return True when a paid search API key is configured."""
+        return bool(
+            (self.settings.google_api_key and self.settings.google_cx)
+            or self.settings.bing_api_key
+        )
+
     async def get_match_stats(self, match_input: MatchInput) -> MatchData:
         try:
             return await self._fetch(match_input)
@@ -48,12 +56,12 @@ class GoogleSyncProvider(DataProvider):
             )
 
     async def _fetch(self, match_input: MatchInput) -> MatchData:
-        team_a = match_input.team_a
-        team_b = match_input.team_b
+        team_a, team_b, alt_queries = resolve_team_names(
+            match_input.team_a, match_input.team_b
+        )
 
         # 1. Live / current match data
-        live_query = f'"{team_a}" "{team_b}" football ao vivo placar'
-        live_text = await self._search_and_aggregate(live_query, top_n=2)
+        live_text = await self._search_match_text(team_a, team_b, alt_queries, mode="live")
         status_str, period = status_from_text(live_text)
         try:
             status = MatchStatus(status_str) if status_str else MatchStatus.UNKNOWN
@@ -86,12 +94,11 @@ class GoogleSyncProvider(DataProvider):
         )
 
         # 2. Team recent form / history
-        form_a = await self._team_form(team_a)
-        form_b = await self._team_form(team_b)
+        form_a = await self._team_form(team_a, match_input.team_a)
+        form_b = await self._team_form(team_b, match_input.team_b)
 
         # 3. H2H
-        h2h_query = f'"{team_a}" vs "{team_b}" head to head results'
-        h2h_text = await self._search_and_aggregate(h2h_query, top_n=2)
+        h2h_text = await self._search_match_text(team_a, team_b, alt_queries, mode="h2h")
         h2h = self._extract_h2h(h2h_text, team_a, team_b)
 
         team_a_stats = self._team_stats(team_a, form_a)
@@ -115,13 +122,57 @@ class GoogleSyncProvider(DataProvider):
             source=self.name,
             completeness=completeness,
             updated_at=datetime.utcnow(),
-            raw_metadata={"query": live_query, "queries": [h2h_query]},
+            raw_metadata={
+                "team_a": team_a,
+                "team_b": team_b,
+                "alt_queries": alt_queries,
+                "team_a_found": bool(team_a_stats and team_a_stats.recent_matches),
+                "team_b_found": bool(team_b_stats and team_b_stats.recent_matches),
+                "live_data_found": bool(live_text),
+            },
         )
 
-    async def _team_form(self, team: str) -> list[LastMatch]:
-        query = f'"{team}" football last 5 matches results'
-        text = await self._search_and_aggregate(query, top_n=3)
-        return self._parse_match_rows(text, team)
+    async def _search_match_text(
+        self,
+        team_a: str,
+        team_b: str,
+        alt_queries: list[str],
+        mode: str = "live",
+    ) -> str:
+        """Search using canonical names, then fall back to original aliases.
+
+        mode: "live" or "h2h"
+        """
+        if mode == "live":
+            queries = [
+                f'"{team_a}" "{team_b}" football ao vivo placar',
+                f'"{team_a}" "{team_b}" football live score',
+            ] + [f'"{q.split(" vs ")[0]}" "{q.split(" vs ")[1]}" football live score' for q in alt_queries if " vs " in q]
+        else:
+            queries = [
+                f'"{team_a}" vs "{team_b}" head to head results',
+                f'"{team_a}" vs "{team_b}" h2h',
+            ] + [f'"{q.split(" vs ")[0]}" vs "{q.split(" vs ")[1]}" head to head results' for q in alt_queries if " vs " in q]
+
+        for query in queries:
+            text = await self._search_and_aggregate(query, top_n=2)
+            if text:
+                return text
+        return ""
+
+    async def _team_form(self, team: str, original: str) -> list[LastMatch]:
+        queries = [
+            f'"{team}" football last 5 matches results',
+            f'"{original}" football last 5 matches results',
+            f'"{team}" results',
+            f'"{original}" results',
+        ]
+        for query in queries:
+            text = await self._search_and_aggregate(query, top_n=3)
+            matches = self._parse_match_rows(text, team) or self._parse_match_rows(text, original)
+            if matches:
+                return matches
+        return []
 
     async def _search_and_aggregate(self, query: str, top_n: int = 3) -> str:
         """Return concatenated snippets and page text from the search query."""

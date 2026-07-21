@@ -17,10 +17,12 @@ ROBO/
 - **FastAPI** expõe o endpoint `/api/matches/analyze`.
 - **Camada `DataProvider`**: abstração para provedores de dados. Implementações atuais:
   - `BrowserNavigationProvider`: Playwright headless navegando no 365Scores para extrair status ao vivo (placar, minuto, escanteios, chutes, posse, cartões) e forma recente.
-  - `GoogleSyncProvider`: busca estruturada via Google Custom Search ou Bing Search API.
-  - `WebSearchProvider`: busca pública no DuckDuckGo + parsing de snippets (fallback leve).
+  - `BrowserSearchProvider`: busca pública sem API key em DuckDuckGo/Google HTML, busca páginas de estatísticas esportivas e extrai dados (fallback inteligente).
+  - `TheSportsDbProvider`: API pública gratuita do TheSportsDB, com busca por nome de time e cobertura ampliada para ligas menores.
+  - `GoogleSyncProvider`: busca estruturada via Google Custom Search ou Bing Search API — **opcional**, só entra no orquestrador quando configurado.
+  - `WebSearchProvider`: busca pública no Yahoo + parsing de snippets (fallback leve).
   - `MockProvider`: retorna dados sintéticos de segurança quando nenhuma fonte funciona.
-- **Orquestrador**: tenta os provedores em ordem (`Browser → Google → Web → Mock`), reaproveita cache SQLite e mescla os melhores pedaços de cada fonte.
+- **Orquestrador**: tenta os provedores em ordem (`BrowserNavigation → BrowserSearch → TheSportsDB → GoogleSync [se configurado] → Web → Mock`), respeita timeout curto por fonte, reaproveita cache SQLite com TTL adaptativo e mescla os melhores pedaços de cada fonte.
 - **Cache SQLite** (`backend/cache/matches.db`): evita múltiplas navegações simultâneas para o mesmo jogo. TTL configurável (padrão 60s).
 - **Motor estatístico** (`app/stats/engine.py`): Poisson para xG, over/under, BTTS, cantos e chutes; análise se adapta a pré-jogo, ao vivo e encerrado.
 
@@ -42,9 +44,11 @@ Copie `backend/.env.example` para `backend/.env` e `frontend/.env.example` para 
 ```env
 FRONTEND_URL=https://meu-painel.vercel.app
 
-# Opcional, mas recomendado para melhorar a qualidade dos dados
-GOOGLE_API_KEY=...
-GOOGLE_CX=...
+# Opcional: Google Custom Search / Bing Search API. O sistema funciona 100%
+# sem essas chaves, usando DuckDuckGo/Google HTML e APIs publicas gratuitas.
+# GOOGLE_API_KEY=...
+# GOOGLE_CX=...
+# BING_API_KEY=...
 
 COMPLETENESS_THRESHOLD=0.3
 CACHE_TTL_SECONDS=60

@@ -3,8 +3,6 @@ import os
 import sqlite3
 import threading
 from datetime import datetime, timedelta
-from typing import Any
-
 from app.models import MatchData, MatchInput
 
 
@@ -26,7 +24,8 @@ class MatchCache:
                     key TEXT PRIMARY KEY,
                     provider TEXT NOT NULL,
                     data TEXT NOT NULL,
-                    created_at TIMESTAMP NOT NULL
+                    created_at TIMESTAMP NOT NULL,
+                    ttl_seconds INTEGER
                 )
                 """
             )
@@ -36,6 +35,11 @@ class MatchCache:
                 ON match_cache(created_at)
                 """
             )
+            # Add ttl_seconds column if the table was created before this migration
+            try:
+                conn.execute("ALTER TABLE match_cache ADD COLUMN ttl_seconds INTEGER")
+            except sqlite3.OperationalError:
+                pass
 
     def _make_key(self, match_input: MatchInput, provider_name: str) -> str:
         norm = lambda s: " ".join(s.strip().lower().split())
@@ -44,30 +48,46 @@ class MatchCache:
     def get(self, match_input: MatchInput, provider_name: str) -> MatchData | None:
         key = self._make_key(match_input, provider_name)
         with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
             row = conn.execute(
-                "SELECT data, created_at FROM match_cache WHERE key = ?", (key,)
+                "SELECT data, created_at, ttl_seconds FROM match_cache WHERE key = ?", (key,)
             ).fetchone()
         if not row:
             return None
-        data_json, created_at = row
-        created = datetime.fromisoformat(created_at)
-        if datetime.utcnow() - created > timedelta(seconds=self.ttl_seconds):
+        if self._is_expired(row):
             return None
         try:
-            parsed = MatchData.model_validate(json.loads(data_json))
-            parsed.updated_at = created
+            parsed = MatchData.model_validate(json.loads(row["data"]))
+            parsed.updated_at = datetime.fromisoformat(row["created_at"])
             return parsed
         except Exception:
             return None
 
-    def set(self, match_input: MatchInput, provider_name: str, data: MatchData) -> None:
+    def set(
+        self,
+        match_input: MatchInput,
+        provider_name: str,
+        data: MatchData,
+        ttl_seconds: int | None = None,
+    ) -> None:
         key = self._make_key(match_input, provider_name)
         with self._lock:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute(
-                    "INSERT OR REPLACE INTO match_cache (key, provider, data, created_at) VALUES (?, ?, ?, ?)",
-                    (key, provider_name, data.model_dump_json(), datetime.utcnow().isoformat()),
+                    "INSERT OR REPLACE INTO match_cache (key, provider, data, created_at, ttl_seconds) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        key,
+                        provider_name,
+                        data.model_dump_json(),
+                        datetime.utcnow().isoformat(),
+                        ttl_seconds or self.ttl_seconds,
+                    ),
                 )
+
+    def _is_expired(self, row: sqlite3.Row) -> bool:
+        created = datetime.fromisoformat(row["created_at"])
+        ttl = row["ttl_seconds"] if row["ttl_seconds"] is not None else self.ttl_seconds
+        return (datetime.utcnow() - created) > timedelta(seconds=ttl)
 
     def clear_old(self, max_age_seconds: int = 3600) -> int:
         cutoff = (datetime.utcnow() - timedelta(seconds=max_age_seconds)).isoformat()

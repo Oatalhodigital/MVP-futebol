@@ -285,12 +285,35 @@ def _finished_analysis(match: MatchData) -> MatchAnalysis:
 
 
 def _insufficient_data_analysis(match: MatchData) -> MatchAnalysis:
+    meta = match.raw_metadata or {}
+    provider_debug = meta.get("provider_debug", [])
+
+    a_found = any(p.get("team_a_found") for p in provider_debug if isinstance(p, dict))
+    b_found = any(p.get("team_b_found") for p in provider_debug if isinstance(p, dict))
+
+    if not a_found and not b_found:
+        disclaimer = (
+            "Não encontramos esses times em nossas bases de dados. "
+            "Confira a grafia ou tente o nome oficial em inglês."
+        )
+    elif not a_found or not b_found:
+        missing = match.team_a if not a_found else match.team_b
+        disclaimer = (
+            f"Não encontramos o time '{missing}' em nossas bases de dados. "
+            "Confira a grafia ou tente o nome oficial em inglês."
+        )
+    else:
+        disclaimer = (
+            "Encontramos os times, mas não há estatísticas recentes suficientes "
+            "para uma análise completa. Isso é comum em ligas menores ou início de temporada."
+        )
+
     return MatchAnalysis(
         match=match,
         mode="insufficient_data",
         label="Dados insuficientes",
         reliable=False,
-        disclaimer="Não foi possível obter dados confiáveis para este jogo agora.",
+        disclaimer=disclaimer,
     )
 
 

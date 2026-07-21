@@ -7,6 +7,7 @@ import httpx
 
 from app.models import LastMatch, LiveState, MatchData, MatchInput, MatchStatus, TeamStats
 from app.providers.base import DataProvider
+from app.providers.team_names import canonical_team_name, resolve_team_names
 from app.providers.utils import normalize
 
 logger = logging.getLogger(__name__)
@@ -41,8 +42,9 @@ class TheSportsDbProvider(DataProvider):
             )
 
     async def _fetch(self, match_input: MatchInput) -> MatchData:
-        team_a = match_input.team_a
-        team_b = match_input.team_b
+        team_a, team_b, _alt_queries = resolve_team_names(
+            match_input.team_a, match_input.team_b
+        )
 
         # Resolve teams and fixture in parallel
         team_a_info, team_b_info, fixture = await asyncio.gather(
@@ -76,7 +78,12 @@ class TheSportsDbProvider(DataProvider):
         team_a_stats = self._team_stats(team_a, form_a)
         team_b_stats = self._team_stats(team_b, form_b)
 
-        completeness = self._completeness(live, team_a_stats, team_b_stats, h2h)
+        # If the team itself is known but has no recent form (common in smaller
+        # leagues or early season), still give partial credit so the result is
+        # not discarded as "unknown".
+        has_basic_data = bool(team_a_info or team_b_info or fixture)
+
+        completeness = self._completeness(live, team_a_stats, team_b_stats, h2h, has_basic_data)
 
         return MatchData(
             team_a=team_a,
@@ -94,7 +101,11 @@ class TheSportsDbProvider(DataProvider):
             source=self.name,
             completeness=completeness,
             updated_at=datetime.utcnow(),
-            raw_metadata={"fixture": fixture},
+            raw_metadata={
+                "fixture": fixture,
+                "team_a_found": bool(team_a_info),
+                "team_b_found": bool(team_b_info),
+            },
         )
 
     async def _api_get(self, endpoint: str, params: dict[str, Any]) -> dict[str, Any] | None:
@@ -114,44 +125,71 @@ class TheSportsDbProvider(DataProvider):
         return None
 
     async def _search_team(self, team_name: str) -> dict[str, Any] | None:
-        """Find the first team whose name closely matches the input."""
-        data = await self._api_get("searchteams.php", {"t": team_name})
-        if not data:
-            return None
+        """Find the first team whose name closely matches the input.
 
-        teams = data.get("teams") or []
-        if not teams:
-            return None
-
+        Tries the canonical/alias name and a few common variants to maximize
+        coverage for smaller leagues and translated names.
+        """
+        canonical = canonical_team_name(team_name)
+        searches = [
+            team_name,
+            canonical,
+            team_name.replace("FC", "").strip(),
+            canonical.replace("FC", "").strip(),
+        ]
+        seen_ids: set[str] = set()
         norm_input = normalize(team_name)
-        for team in teams:
-            if normalize(team.get("strTeam", "")) == norm_input:
-                return team
-            if team.get("strTeamShort", "").lower() == team_name.lower():
-                return team
-        # fallback to first result if name is contained
-        for team in teams:
-            if norm_input in normalize(team.get("strTeam", "")):
-                return team
-        return teams[0]
+        norm_canonical = normalize(canonical)
+
+        for query in searches:
+            if not query:
+                continue
+            data = await self._api_get("searchteams.php", {"t": query})
+            if not data:
+                continue
+            teams = data.get("teams") or []
+            for team in teams:
+                team_id = team.get("idTeam")
+                if team_id in seen_ids:
+                    continue
+                seen_ids.add(team_id)
+                norm_team = normalize(team.get("strTeam", ""))
+                if norm_team in (norm_input, norm_canonical):
+                    return team
+                if team.get("strTeamShort", "").lower() == query.lower():
+                    return team
+                if norm_input in norm_team or norm_canonical in norm_team:
+                    return team
+        return None
 
     async def _find_fixture(self, team_a: str, team_b: str) -> dict[str, Any] | None:
-        """Search for a fixture involving both teams."""
-        data = await self._api_get("searchevents.php", {"e": f"{team_a}_vs_{team_b}"})
-        if not data:
-            return None
+        """Search for a fixture involving both teams.
 
-        events = data.get("event") or []
-        norm_a = normalize(team_a)
-        norm_b = normalize(team_b)
-        for event in events:
-            home = normalize(event.get("strHomeTeam", ""))
-            away = normalize(event.get("strAwayTeam", ""))
-            if (norm_a in home or home in norm_a) and (norm_b in away or away in norm_b):
-                return event
-            if (norm_b in home or home in norm_b) and (norm_a in away or away in norm_a):
-                return event
-        return events[0] if events else None
+        Tries multiple phrasings to cover domestic leagues, qualifiers and cups.
+        """
+        queries = [
+            f"{team_a}_vs_{team_b}",
+            f"{team_b}_vs_{team_a}",
+            f"{team_a} {team_b}",
+        ]
+        for query in queries:
+            data = await self._api_get("searchevents.php", {"e": query})
+            if not data:
+                continue
+            events = data.get("event") or []
+            if not events:
+                continue
+            norm_a = normalize(team_a)
+            norm_b = normalize(team_b)
+            for event in events:
+                home = normalize(event.get("strHomeTeam", ""))
+                away = normalize(event.get("strAwayTeam", ""))
+                if (norm_a in home or home in norm_a) and (norm_b in away or away in norm_b):
+                    return event
+                if (norm_b in home or home in norm_b) and (norm_a in away or away in norm_a):
+                    return event
+            return events[0]
+        return None
 
     async def _team_form(self, team_info: dict[str, Any] | None) -> list[LastMatch]:
         """Return the last finished matches for a team."""
@@ -264,6 +302,7 @@ class TheSportsDbProvider(DataProvider):
         a: TeamStats | None,
         b: TeamStats | None,
         h2h: list[LastMatch],
+        has_basic_data: bool = False,
     ) -> float:
         score = 0.0
         if live and live.status and live.status != MatchStatus.UNKNOWN:
@@ -272,10 +311,14 @@ class TheSportsDbProvider(DataProvider):
             score += 0.10
         if a and len(a.recent_matches) >= 3:
             score += 0.20
+        elif a and a.recent_matches:
+            score += 0.05
         if b and len(b.recent_matches) >= 3:
             score += 0.20
+        elif b and b.recent_matches:
+            score += 0.05
         if h2h:
             score += 0.10
-        if a or b:
+        if has_basic_data:
             score += 0.05
         return round(min(score, 1.0), 2)
