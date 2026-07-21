@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import GameForm from './components/GameForm'
 import AnalysisPanel from './components/AnalysisPanel'
+import { apiUrl } from './lib/api'
 import type { MatchAnalysis } from './types'
 
 function App() {
@@ -17,8 +18,7 @@ function App() {
     setLoading(true)
     setError('')
     try {
-      const apiBase = import.meta.env.VITE_API_URL || ''
-      const res = await fetch(`${apiBase}/api/matches/analyze`, {
+      const res = await fetch(apiUrl('/api/matches/analyze'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
