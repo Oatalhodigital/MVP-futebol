@@ -49,7 +49,7 @@ class WebSearchProvider(DataProvider):
         team_b_stats, b_parsed = await self._search_team_stats(team_b)
         h2h, h2h_parsed = await self._search_h2h(team_a, team_b)
 
-        live_query = f"{team_a} {team_b} football ao vivo placar"
+        live_query = f"{team_a} {team_b} football score match"
         live_text = await self._search_text(live_query)
         status_str, period = status_from_text(live_text)
         try:
