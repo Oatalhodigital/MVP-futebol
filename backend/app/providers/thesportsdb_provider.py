@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime
+from difflib import SequenceMatcher
 from typing import Any
 
 import httpx
@@ -125,21 +126,12 @@ class TheSportsDbProvider(DataProvider):
         return None
 
     async def _search_team(self, team_name: str) -> dict[str, Any] | None:
-        """Find the first team whose name closely matches the input.
-
-        Tries the canonical/alias name and a few common variants to maximize
-        coverage for smaller leagues and translated names.
-        """
+        """Find the best matching team using canonical/alias names and fuzzy scoring."""
         canonical = canonical_team_name(team_name)
-        searches = [
-            team_name,
-            canonical,
-            team_name.replace("FC", "").strip(),
-            canonical.replace("FC", "").strip(),
-        ]
+        searches = {team_name, canonical, team_name.replace("FC", "").strip(), canonical.replace("FC", "").strip()}
+
+        all_teams: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
-        norm_input = normalize(team_name)
-        norm_canonical = normalize(canonical)
 
         for query in searches:
             if not query:
@@ -147,20 +139,44 @@ class TheSportsDbProvider(DataProvider):
             data = await self._api_get("searchteams.php", {"t": query})
             if not data:
                 continue
-            teams = data.get("teams") or []
-            for team in teams:
+            for team in data.get("teams") or []:
                 team_id = team.get("idTeam")
-                if team_id in seen_ids:
+                if not team_id or team_id in seen_ids:
                     continue
                 seen_ids.add(team_id)
-                norm_team = normalize(team.get("strTeam", ""))
-                if norm_team in (norm_input, norm_canonical):
-                    return team
-                if team.get("strTeamShort", "").lower() == query.lower():
-                    return team
-                if norm_input in norm_team or norm_canonical in norm_team:
-                    return team
-        return None
+                all_teams.append(team)
+
+        if not all_teams:
+            return None
+
+        norm_input = normalize(team_name)
+        norm_canonical = normalize(canonical)
+
+        def _score(team: dict[str, Any]) -> float:
+            norm_team = normalize(team.get("strTeam", ""))
+            norm_alt = normalize(team.get("strTeamAlternate", ""))
+            short = (team.get("strTeamShort") or "").lower()
+
+            if norm_team in (norm_input, norm_canonical) or norm_alt in (norm_input, norm_canonical):
+                return 1.0
+            if short in (team_name.lower(), canonical.lower()):
+                return 0.95
+            if norm_input in norm_team or norm_canonical in norm_team:
+                return 0.85
+            if norm_input in norm_alt or norm_canonical in norm_alt:
+                return 0.80
+            # Fuzzy similarity for cases like "Larne FC" vs "Larne"
+            return max(
+                SequenceMatcher(None, norm_input, norm_team).ratio(),
+                SequenceMatcher(None, norm_canonical, norm_team).ratio(),
+                SequenceMatcher(None, norm_input, norm_alt).ratio(),
+                SequenceMatcher(None, norm_canonical, norm_alt).ratio(),
+            )
+
+        best = max(all_teams, key=_score)
+        if _score(best) < 0.5:
+            return None
+        return best
 
     async def _find_fixture(self, team_a: str, team_b: str) -> dict[str, Any] | None:
         """Search for a fixture involving both teams.
