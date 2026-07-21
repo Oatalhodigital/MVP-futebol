@@ -93,15 +93,26 @@ class TheSportsDbProvider(DataProvider):
             raw_metadata={"fixture": fixture},
         )
 
+    async def _api_get(self, endpoint: str, params: dict[str, Any]) -> dict[str, Any] | None:
+        """Make a GET request to TheSportsDB with retries and longer timeout."""
+        url = f"{BASE_URL}/{endpoint}"
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.get(url, params=params)
+                    response.raise_for_status()
+                    return response.json()
+            except Exception as exc:
+                last_exc = exc
+                logger.info("TheSportsDB request failed (attempt %d): %s", attempt + 1, exc)
+        logger.warning("TheSportsDB request failed after retries: %s", last_exc)
+        return None
+
     async def _search_team(self, team_name: str) -> dict[str, Any] | None:
         """Find the first team whose name closely matches the input."""
-        url = f"{BASE_URL}/searchteams.php"
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.get(url, params={"t": team_name})
-                response.raise_for_status()
-                data = response.json()
-        except Exception:
+        data = await self._api_get("searchteams.php", {"t": team_name})
+        if not data:
             return None
 
         teams = data.get("teams") or []
@@ -122,16 +133,8 @@ class TheSportsDbProvider(DataProvider):
 
     async def _find_fixture(self, team_a: str, team_b: str) -> dict[str, Any] | None:
         """Search for a fixture involving both teams."""
-        url = f"{BASE_URL}/searchevents.php"
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.get(
-                    url,
-                    params={"e": f"{team_a}_vs_{team_b}"},
-                )
-                response.raise_for_status()
-                data = response.json()
-        except Exception:
+        data = await self._api_get("searchevents.php", {"e": f"{team_a}_vs_{team_b}"})
+        if not data:
             return None
 
         events = data.get("event") or []
@@ -153,12 +156,8 @@ class TheSportsDbProvider(DataProvider):
         team_id = team_info.get("idTeam")
         if not team_id:
             return []
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.get(f"{BASE_URL}/eventslast.php", params={"id": team_id})
-                response.raise_for_status()
-                data = response.json()
-        except Exception:
+        data = await self._api_get("eventslast.php", {"id": team_id})
+        if not data:
             return []
 
         results = data.get("results") or []
