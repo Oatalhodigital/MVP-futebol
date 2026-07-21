@@ -42,6 +42,7 @@ class DataProviderOrchestrator:
             return cached
 
         results: list[MatchData] = []
+        provider_debug: list[dict[str, Any]] = []
         for provider in self.providers:
             try:
                 logger.info("Trying provider %s", provider.name)
@@ -59,6 +60,14 @@ class DataProviderOrchestrator:
                     data.source if data else None,
                     data.completeness if data else None,
                 )
+                provider_debug.append(
+                    {
+                        "provider": provider.name,
+                        "source": data.source if data else None,
+                        "completeness": data.completeness if data else None,
+                        "error": (data.raw_metadata or {}).get("error") if data else None,
+                    }
+                )
                 if data and data.completeness > 0:
                     results.append(data)
                     # If one provider alone is very complete, use it immediately
@@ -66,6 +75,7 @@ class DataProviderOrchestrator:
                         break
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Provider %s raised exception: %s", provider.name, exc, exc_info=True)
+                provider_debug.append({"provider": provider.name, "error": repr(exc)})
                 continue
 
         # Exclude mock/placeholder results from being treated as real data
@@ -73,6 +83,7 @@ class DataProviderOrchestrator:
 
         merged = self._merge(real_results, match_input) if real_results else await self._empty(match_input)
         merged.source = self._source_label(merged, real_results)
+        merged.raw_metadata = {**merged.raw_metadata, "provider_debug": provider_debug}
         self.cache.set(match_input, "merged", merged)
         return merged
 
