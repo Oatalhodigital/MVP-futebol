@@ -84,6 +84,28 @@ def contains_team(text: str, team: str) -> bool:
     return bool(tokens & text_tokens) and len(tokens & text_tokens) >= max(1, len(tokens) - 1)
 
 
+def _has_live_context(text: str) -> bool:
+    """Return True when the text contains markers that the match is happening now."""
+    lowered = text.lower()
+    live_markers = [
+        "ao vivo",
+        "live now",
+        "live match",
+        "em andamento",
+        "em curso",
+        "em jogo",
+        "agora",
+        "now",
+        "atual",
+        "playing",
+    ]
+    if any(marker in lowered for marker in live_markers):
+        return True
+    if extract_minute(text) is not None:
+        return True
+    return False
+
+
 def status_from_text(text: str) -> tuple[str, str | None]:
     """Detect live match status and a period label from free text."""
     lowered = text.lower()
@@ -100,6 +122,10 @@ def status_from_text(text: str) -> tuple[str, str | None]:
         "ended",
         "jogo encerrado",
         "final da partida",
+        "match report",
+        "resumo",
+        "highlights",
+        "melhores momentos",
     ]
     halftime_markers = ["intervalo", "half time", "half-time", "halftime", "ht", "meio-tempo"]
     second_half_markers = [
@@ -135,15 +161,26 @@ def status_from_text(text: str) -> tuple[str, str | None]:
     for marker in finished_markers:
         if marker in lowered:
             return ("finished", "Encerrado")
+
+    live_context = _has_live_context(text)
+
     for marker in halftime_markers:
         if marker in lowered:
-            return ("live_halftime", "Intervalo")
+            if live_context:
+                return ("live_halftime", "Intervalo")
+            # Without live context, "half time" usually appears in finished match summaries
+            return ("finished", "Encerrado")
     for marker in second_half_markers:
         if marker in lowered:
-            return ("live_second_half", "2º tempo")
+            if live_context:
+                return ("live_second_half", "2º tempo")
+            return ("finished", "Encerrado")
     for marker in first_half_markers:
         if marker in lowered:
-            return ("live_first_half", "1º tempo")
+            if marker in ("ao vivo", "live", "em andamento", "em curso", "em jogo") or live_context:
+                return ("live_first_half", "1º tempo")
+            # "1st half" in old reports is normally a finished game recap
+            return ("finished", "Encerrado")
     for marker in scheduled_markers:
         if marker in lowered:
             return ("scheduled", "Agendado")
