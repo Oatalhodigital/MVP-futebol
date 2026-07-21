@@ -1,5 +1,6 @@
 import re
 from datetime import datetime
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -11,6 +12,7 @@ from app.providers.utils import (
     extract_minute,
     extract_score_with_teams,
     extract_stat_pairs,
+    normalize,
     status_from_text,
 )
 
@@ -24,6 +26,19 @@ class WebSearchProvider(DataProvider):
     """
 
     name = "web_search"
+
+    # Sites that usually return structured football data and are safe to fetch
+    _PREFERRED_SITES = {
+        "flashscore",
+        "sofascore",
+        "livescore",
+        "espn",
+        "soccerway",
+        "fotmob",
+        "whoscored",
+        "transfermarkt",
+        "worldfootball",
+    }
 
     async def get_match_stats(self, match_input: MatchInput) -> MatchData:
         team_a = match_input.team_a
@@ -61,6 +76,14 @@ class WebSearchProvider(DataProvider):
                 live.status = MatchStatus.LIVE_FIRST_HALF
             else:
                 live.status = MatchStatus.SCHEDULED
+
+        # Try to enrich live stats from the search text
+        stats = extract_stat_pairs(live_text)
+        for stat_name in ("corners", "shots", "shots_on_target", "possession", "yellow_cards", "red_cards"):
+            value = stats.get(stat_name)
+            if value:
+                setattr(live, f"{stat_name}_a", value[0])
+                setattr(live, f"{stat_name}_b", value[1])
 
         completeness = self._completeness(
             a_parsed, b_parsed, h2h_parsed, live
@@ -110,7 +133,18 @@ class WebSearchProvider(DataProvider):
             return ""
         soup = BeautifulSoup(html, "lxml")
         snippets = self._extract_snippets(soup)
-        return "\n".join(snippets).lower()
+        text = "\n".join(snippets)
+
+        # Fetch first few result pages to enrich the text with structured data
+        links = self._extract_links(soup)[:3]
+        if links:
+            try:
+                pages = await self._fetch_pages(links)
+                text += "\n" + "\n".join(pages)
+            except Exception:
+                pass
+
+        return text.lower()
 
     async def _search(self, query: str) -> str:
         try:
@@ -130,6 +164,32 @@ class WebSearchProvider(DataProvider):
                 return response.text
         except Exception:
             return ""
+
+    async def _fetch_pages(self, links: list[str]) -> list[str]:
+        """Fetch the first preferred result pages and return extracted text."""
+        texts: list[str] = []
+        try:
+            async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
+                for link in links:
+                    try:
+                        response = await client.get(
+                            link,
+                            headers={
+                                "User-Agent": (
+                                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                    "Chrome/125.0 Safari/537.36"
+                                )
+                            },
+                        )
+                        soup = BeautifulSoup(response.text, "lxml")
+                        page_text = soup.get_text(" ", strip=True)
+                        texts.append(page_text)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        return texts
 
     def _extract_snippets(self, soup) -> list[str]:
         """Very light parser for DuckDuckGo result snippets."""
@@ -153,14 +213,42 @@ class WebSearchProvider(DataProvider):
             snippets = [re.sub(r"<[^>]+>", " ", s).strip() for s in snippets]
         return snippets
 
+    def _extract_links(self, soup) -> list[str]:
+        """Extract result links from DuckDuckGo HTML, preferring known sports sites."""
+        links: list[str] = []
+        preferred: list[str] = []
+        for el in soup.select("a.result__a"):
+            href = el.get("href")
+            if not href:
+                continue
+            if href.startswith("/"):
+                href = urljoin("https://html.duckduckgo.com/html/", href)
+            # DuckDuckGo wraps real URLs in /l/?uddg=<url>
+            if "duckduckgo.com/l/" in href and "uddg=" in href:
+                parsed = urlparse(href)
+                qs = parse_qs(parsed.query)
+                real = qs.get("uddg", [""])[0]
+                if real:
+                    href = unquote(real)
+            lowered = href.lower()
+            if any(site in lowered for site in self._PREFERRED_SITES):
+                preferred.append(href)
+            else:
+                links.append(href)
+        # Prefer known data-rich sites, then any other result
+        return preferred + links
+
     def _parse_match_rows(self, text: str, team_name: str, max_rows: int = 10) -> list[LastMatch]:
         matches: list[LastMatch] = []
         seen: set[tuple[str, int, int]] = set()
         score_regex = re.compile(r"(\d{1,2})\s*[-–:]\s*(\d{1,2})")
 
+        # Normalize once for matching
+        norm_team = normalize(team_name)
+
         for score_m in score_regex.finditer(text):
-            start = max(0, score_m.start() - 120)
-            end = min(len(text), score_m.end() + 120)
+            start = max(0, score_m.start() - 160)
+            end = min(len(text), score_m.end() + 160)
             ctx = text[start:end]
 
             if not contains_team(ctx, team_name):
@@ -170,16 +258,26 @@ class WebSearchProvider(DataProvider):
             g_away = int(score_m.group(2))
 
             team_pattern = re.compile(
-                r"([a-z0-9áéíóúãõç\s'.\-]{3,50}?)\s+"
+                r"([a-z0-9áéíóúãõç\s'.\-]{2,50}?)\s+"
                 + re.escape(score_m.group(0))
-                + r"\s+([a-z0-9áéíóúãõç\s'.\-]{3,50}?)",
+                + r"\s+([a-z0-9áéíóúãõç\s'.\-]{2,50}?)",
                 re.IGNORECASE,
             )
             m = team_pattern.search(ctx)
-            if not m:
-                continue
-            left = m.group(1).strip()
-            right = m.group(2).strip()
+            if m:
+                left = m.group(1).strip()
+                right = m.group(2).strip()
+            else:
+                # Fallback: try to infer opponent from context tokens
+                tokens = [t for t in re.split(r"[\s\-–:|,;()]", ctx) if len(t) > 2]
+                # Find two tokens around the score, excluding the team itself
+                score_pos = ctx.find(score_m.group(0))
+                before = ctx[:score_pos]
+                after = ctx[score_pos + len(score_m.group(0)):]
+                left = before.strip().split()[-1] if before.strip() else ""
+                right = after.strip().split()[0] if after.strip() else ""
+                if not left or not right:
+                    continue
 
             team_on_left = contains_team(left, team_name)
             team_on_right = contains_team(right, team_name)
@@ -194,7 +292,11 @@ class WebSearchProvider(DataProvider):
             else:
                 continue
 
-            key = (opponent.lower(), gf, ga)
+            norm_opponent = normalize(opponent)
+            if norm_opponent == norm_team:
+                continue
+
+            key = (norm_opponent, gf, ga)
             if key in seen:
                 continue
             seen.add(key)
