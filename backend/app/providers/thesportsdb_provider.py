@@ -43,11 +43,12 @@ class TheSportsDbProvider(DataProvider):
         team_a = match_input.team_a
         team_b = match_input.team_b
 
-        team_a_info = await self._search_team(team_a)
-        team_b_info = await self._search_team(team_b)
-
-        # Find the fixture between the two teams
-        fixture = await self._find_fixture(team_a, team_b)
+        # Resolve teams and fixture in parallel
+        team_a_info, team_b_info, fixture = await asyncio.gather(
+            self._search_team(team_a),
+            self._search_team(team_b),
+            self._find_fixture(team_a, team_b),
+        )
 
         live = LiveState(status=MatchStatus.UNKNOWN)
         match_datetime = None
@@ -62,9 +63,11 @@ class TheSportsDbProvider(DataProvider):
                 minute=None,
             )
 
-        # Recent form for each team
-        form_a = await self._team_form(team_a_info) if team_a_info else []
-        form_b = await self._team_form(team_b_info) if team_b_info else []
+        # Recent form for each team in parallel
+        form_a, form_b = await asyncio.gather(
+            self._team_form(team_a_info),
+            self._team_form(team_b_info),
+        )
 
         # H2H from team A form filtered by opponent
         h2h = [m for m in form_a if normalize(m.opponent) == normalize(team_b)][:5]
