@@ -44,11 +44,11 @@ class DataProviderOrchestrator:
             try:
                 logger.info("Trying provider %s", provider.name)
                 cached_provider = self.cache.get(match_input, provider.name)
-                if cached_provider:
+                if cached_provider and cached_provider.completeness > 0:
                     data = cached_provider
                 else:
                     data = await provider.get_match_stats(match_input)
-                    if data:
+                    if data and data.completeness > 0:
                         self.cache.set(match_input, provider.name, data)
 
                 logger.info(

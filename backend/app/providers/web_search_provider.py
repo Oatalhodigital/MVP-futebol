@@ -1,3 +1,4 @@
+import base64
 import re
 from datetime import datetime
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
@@ -48,7 +49,7 @@ class WebSearchProvider(DataProvider):
         team_b_stats, b_parsed = await self._search_team_stats(team_b)
         h2h, h2h_parsed = await self._search_h2h(team_a, team_b)
 
-        live_query = f'"{team_a}" "{team_b}" football ao vivo placar'
+        live_query = f"{team_a} {team_b} football ao vivo placar"
         live_text = await self._search_text(live_query)
         status_str, period = status_from_text(live_text)
         try:
@@ -109,23 +110,41 @@ class WebSearchProvider(DataProvider):
         )
 
     async def _search_team_stats(self, team: str) -> tuple[TeamStats | None, int]:
-        """Search for `team last 5 matches` and parse snippets.
+        """Search for `team results` and parse snippets.
 
         Returns the computed stats and the number of parsed real matches.
         """
-        query = f'"{team}" last 5 matches football results'
-        text = await self._search_text(query)
+        # Try a few queries to maximize chance of finding structured results
+        queries = [
+            f"{team} football results 2025",
+            f"{team} latest match result",
+            f"{team} last 5 matches results",
+        ]
+        for query in queries:
+            text = await self._search_text(query)
+            matches = self._parse_match_rows(text, team)
+            if len(matches) >= 3:
+                return self._team_stats_from_matches(team, matches), len(matches)
+        # Last attempt: use whatever we got
+        text = await self._search_text(queries[0])
         matches = self._parse_match_rows(text, team)
-        if not matches:
-            return None, 0
-        return self._team_stats_from_matches(team, matches), len(matches)
+        if matches:
+            return self._team_stats_from_matches(team, matches), len(matches)
+        return None, 0
 
     async def _search_h2h(self, a: str, b: str) -> tuple[list[LastMatch], int]:
-        query = f'"{a}" vs "{b}" head to head results'
-        text = await self._search_text(query)
-        rows = self._parse_match_rows(text, a)
-        h2h = [r for r in rows if contains_team(r.opponent, b)]
-        return h2h, len(h2h)
+        queries = [
+            f"{a} vs {b} football result",
+            f"{a} vs {b} head to head results",
+            f"{a} {b} match result",
+        ]
+        for query in queries:
+            text = await self._search_text(query)
+            rows = self._parse_match_rows(text, a)
+            h2h = [r for r in rows if contains_team(r.opponent, b)]
+            if h2h:
+                return h2h, len(h2h)
+        return [], 0
 
     async def _search_text(self, query: str) -> str:
         html = await self._search(query)
@@ -136,7 +155,7 @@ class WebSearchProvider(DataProvider):
         text = "\n".join(snippets)
 
         # Fetch first few result pages to enrich the text with structured data
-        links = self._extract_links(soup)[:3]
+        links = self._extract_links(soup)[:5]
         if links:
             try:
                 pages = await self._fetch_pages(links)
@@ -147,16 +166,17 @@ class WebSearchProvider(DataProvider):
         return text.lower()
 
     async def _search(self, query: str) -> str:
+        """Search using Yahoo HTML search."""
         try:
             async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
                 response = await client.get(
-                    "https://html.duckduckgo.com/html/",
-                    params={"q": query},
+                    "https://search.yahoo.com/search",
+                    params={"p": query},
                     headers={
                         "User-Agent": (
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                             "AppleWebKit/537.36 (KHTML, like Gecko) "
-                            "Chrome/123.0 Safari/537.36"
+                            "Chrome/125.0 Safari/537.36"
                         ),
                         "Accept-Language": "en-US,en;q=0.9",
                     },
@@ -192,44 +212,36 @@ class WebSearchProvider(DataProvider):
         return texts
 
     def _extract_snippets(self, soup) -> list[str]:
-        """Very light parser for DuckDuckGo result snippets."""
+        """Parse Yahoo result snippets (titles + abstracts)."""
         snippets = []
-        for pattern in [
-            'a.result__a',
-            'a.result__snippet',
-            '.result__snippet',
-            '.result',
-            '.web-result',
-        ]:
-            for el in soup.select(pattern):
-                snippets.append(el.get_text(" ", strip=True))
+        for result in soup.select(".algo"):
+            title_el = result.select_one("a") or result.select_one("h3 a")
+            # Yahoo snippets are in span with class fc-falcon or similar
+            abstract_el = result.select_one(".fc-falcon") or result.select_one(".s-abs") or result.select_one("p")
+            title = title_el.get_text(" ", strip=True) if title_el else ""
+            abstract = abstract_el.get_text(" ", strip=True) if abstract_el else ""
+            if title:
+                snippets.append(title)
+            if abstract:
+                snippets.append(abstract)
         if not snippets:
-            # fallback regex
-            for pat in [
-                r'<a[^>]+class="result__a"[^>]*>(.*?)</a>',
-                r'<div[^>]+class="result__snippet"[^>]*>(.*?)</div>',
-            ]:
-                snippets.extend(re.findall(pat, str(soup), re.IGNORECASE | re.DOTALL))
-            snippets = [re.sub(r"<[^>]+>", " ", s).strip() for s in snippets]
+            # fallback: any visible link text
+            for el in soup.select("a, .fc-falcon, .s-abs, p"):
+                snippets.append(el.get_text(" ", strip=True))
         return snippets
 
     def _extract_links(self, soup) -> list[str]:
-        """Extract result links from DuckDuckGo HTML, preferring known sports sites."""
+        """Extract result links from Yahoo HTML, preferring known sports sites."""
         links: list[str] = []
         preferred: list[str] = []
-        for el in soup.select("a.result__a"):
-            href = el.get("href")
+        for result in soup.select(".algo"):
+            a = result.select_one("a") or result.select_one("h3 a")
+            if not a:
+                continue
+            href = a.get("href") or ""
+            href = self._decode_yahoo_link(href)
             if not href:
                 continue
-            if href.startswith("/"):
-                href = urljoin("https://html.duckduckgo.com/html/", href)
-            # DuckDuckGo wraps real URLs in /l/?uddg=<url>
-            if "duckduckgo.com/l/" in href and "uddg=" in href:
-                parsed = urlparse(href)
-                qs = parse_qs(parsed.query)
-                real = qs.get("uddg", [""])[0]
-                if real:
-                    href = unquote(real)
             lowered = href.lower()
             if any(site in lowered for site in self._PREFERRED_SITES):
                 preferred.append(href)
@@ -237,6 +249,25 @@ class WebSearchProvider(DataProvider):
                 links.append(href)
         # Prefer known data-rich sites, then any other result
         return preferred + links
+
+    def _decode_yahoo_link(self, href: str) -> str | None:
+        """Resolve Yahoo redirect URLs to the real destination."""
+        if not href:
+            return None
+        if href.startswith("http") and "r.search.yahoo.com" not in href:
+            return href
+        try:
+            parsed = urlparse(href)
+            qs = parse_qs(parsed.query)
+            real = qs.get("RU", [""])[0]
+            if real:
+                return unquote(real)
+            real = qs.get("ru", [""])[0]
+            if real:
+                return unquote(real)
+        except Exception:
+            pass
+        return href if href.startswith("http") else None
 
     def _parse_match_rows(self, text: str, team_name: str, max_rows: int = 10) -> list[LastMatch]:
         matches: list[LastMatch] = []
