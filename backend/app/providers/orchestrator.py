@@ -8,6 +8,7 @@ from app.providers.base import DataProvider
 from app.providers.browser_navigation_provider import BrowserNavigationProvider
 from app.providers.google_sync_provider import GoogleSyncProvider
 from app.providers.mock_provider import MockProvider
+from app.providers.thesportsdb_provider import TheSportsDbProvider
 from app.providers.web_search_provider import WebSearchProvider
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ class DataProviderOrchestrator:
         cache: MatchCache | None = None,
     ):
         self.providers = providers or [
+            TheSportsDbProvider(),
             BrowserNavigationProvider(),
             GoogleSyncProvider(),
             WebSearchProvider(),
