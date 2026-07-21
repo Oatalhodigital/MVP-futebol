@@ -153,6 +153,15 @@ class DataProviderOrchestrator:
         status = best_live.status if best_live and best_live.status != MatchStatus.UNKNOWN else base.status
         live = best_live
 
+        # Give partial credit when at least one provider recognised the teams,
+        # so we can distinguish "teams not found" from "teams found, stats missing".
+        has_basic_data = any(
+            bool((r.raw_metadata or {}).get("team_a_found"))
+            or bool((r.raw_metadata or {}).get("team_b_found"))
+            for r in results
+            if r.source != "mock"
+        )
+
         merged = MatchData(
             team_a=match_input.team_a,
             team_b=match_input.team_b,
@@ -167,9 +176,15 @@ class DataProviderOrchestrator:
             team_b_stats=best_b,
             h2h=best_h2h,
             source="",
-            completeness=round(self._completeness(live, best_a, best_b, best_h2h), 2),
+            completeness=round(
+                self._completeness(live, best_a, best_b, best_h2h, has_basic_data), 2
+            ),
             updated_at=datetime.utcnow(),
-            raw_metadata={"providers": [d.source for d in results]},
+            raw_metadata={
+                "providers": [d.source for d in results],
+                "team_a_found": bool((base.raw_metadata or {}).get("team_a_found")),
+                "team_b_found": bool((base.raw_metadata or {}).get("team_b_found")),
+            },
         )
         return merged
 
@@ -208,6 +223,7 @@ class DataProviderOrchestrator:
         a: TeamStats | None,
         b: TeamStats | None,
         h2h: list,
+        has_basic_data: bool = False,
     ) -> float:
         score = 0.0
         if live and live.status and live.status != MatchStatus.UNKNOWN:
@@ -232,6 +248,8 @@ class DataProviderOrchestrator:
             score += 0.20
         if h2h:
             score += 0.10
+        if has_basic_data:
+            score += 0.05
         return min(score, 1.0)
 
     def _source_label(self, merged: MatchData, results: list[MatchData]) -> str:
